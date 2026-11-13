@@ -11,6 +11,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
 COPY samples ./samples
+COPY scripts ./scripts
 
 ENV DATA_DIR=/data \
     INPUT_CSV=/app/samples/inputs/lims.csv \

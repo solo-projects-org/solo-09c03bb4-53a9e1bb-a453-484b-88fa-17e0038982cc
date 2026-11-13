@@ -49,7 +49,24 @@ CREATE TABLE IF NOT EXISTS batches (
     row_count      INTEGER,
     file_path      TEXT,
     file_sha256    TEXT,
-    file_size      INTEGER
+    file_size      INTEGER,
+    source_version INTEGER NOT NULL DEFAULT 1   -- source extract pinned at admission
+);
+
+-- Every LIMS extract version ever activated.  A row exists only after the
+-- full file was written and fsynced inside the data volume and the row was
+-- committed, so a crash mid-activation leaves no usable row behind.
+CREATE TABLE IF NOT EXISTS source_versions (
+    version        INTEGER PRIMARY KEY,          -- monotonic, 1 = seeded config CSV
+    file_name      TEXT NOT NULL,                -- original upload file name
+    file_path      TEXT NOT NULL,                -- absolute path inside the data volume
+    sha256         TEXT NOT NULL,
+    byte_size      INTEGER NOT NULL,
+    row_count      INTEGER NOT NULL,
+    subject_count  INTEGER NOT NULL,
+    base_version   INTEGER,                      -- version the upload was based on (NULL for v1)
+    activated_at   TEXT NOT NULL,
+    boot_id        TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS batch_subjects (
@@ -98,3 +115,11 @@ class Database:
     def init(self) -> None:
         with self.connect() as conn:
             conn.executescript(SCHEMA)
+            # Migration for data volumes created before source versioning:
+            # old batch rows get column added; they are backfilled to v1 by
+            # the service once the config CSV is registered as the initial version.
+            cols = {r["name"] for r in conn.execute("PRAGMA table_info(batches)").fetchall()}
+            if "source_version" not in cols:
+                conn.execute(
+                    "ALTER TABLE batches ADD COLUMN source_version INTEGER NOT NULL DEFAULT 1"
+                )

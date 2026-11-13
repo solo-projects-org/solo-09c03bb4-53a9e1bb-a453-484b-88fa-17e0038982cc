@@ -36,6 +36,7 @@ class BatchView(BaseModel):
     failure_reason: Optional[str]
     finished_at: Optional[str]
     row_count: Optional[int]
+    source_version: int = Field(..., description="LIMS source extract version pinned at admission")
     downloadable: bool
 
 
@@ -54,6 +55,23 @@ class SubjectList(BaseModel):
 class HealthView(BaseModel):
     status: Literal["ok"]
     boot_id: str
+
+
+class SourceVersionView(BaseModel):
+    version: int
+    file_name: str
+    sha256: str
+    byte_size: int
+    row_count: int
+    subject_count: int
+    base_version: Optional[int]
+    activated_at: str
+    is_current: bool
+
+
+class SourceVersionList(BaseModel):
+    current_version: int
+    versions: list[SourceVersionView]
 
 
 class ErrorBody(BaseModel):

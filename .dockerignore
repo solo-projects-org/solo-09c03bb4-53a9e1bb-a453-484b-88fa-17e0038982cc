@@ -3,3 +3,7 @@ __pycache__
 *.pyc
 data
 tests
+.pylibs
+.venv
+venv
+.pytest_cache

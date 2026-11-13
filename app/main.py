@@ -1,10 +1,10 @@
-"""HTTP surface: consent registry, batch generation, batch download."""
+"""HTTP surface: source versions, consent registry, batch generation, downloads."""
 
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .config import Settings
@@ -16,12 +16,19 @@ from .schemas import (
     ConsentUpdate,
     ErrorBody,
     HealthView,
+    SourceVersionList,
+    SourceVersionView,
     SubjectList,
     SubjectView,
 )
 from .service import ApiError, Service
 
 _TAGS = [
+    {
+        "name": "sources",
+        "description": "Versioned LIMS source extracts: query the current version, "
+        "upload whole-file corrections and download any activated version for tracing.",
+    },
     {"name": "consent", "description": "Read and change subject consent. Changes apply immediately."},
     {"name": "batches", "description": "Start de-identified generation batches and inspect their state."},
     {"name": "download", "description": "Download a completed, still-valid batch CSV."},
@@ -41,13 +48,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(
         lifespan=lifespan,
         title="LIMS De-identification Batch API",
-        version="1.0.0",
+        version="2.0.0",
         description=(
-            "Single-instance de-identification service for a fixed LIMS extract.\n\n"
+            "Single-instance de-identification service over versioned LIMS extracts.\n\n"
             "A batch replaces subject ids with study codes that are stable across batches; "
-            "all other values and row order are unchanged. Revoking consent permanently "
-            "invalidates every batch that included that subject, including batches already "
-            "generated, and later re-consent does not restore them."
+            "all other values and row order are unchanged. Each batch pins the source extract "
+            "version active at admission and never mixes in data from a later replacement. "
+            "Revoking consent permanently invalidates every batch that included that subject, "
+            "including batches already generated, and later re-consent does not restore them."
         ),
         openapi_tags=_TAGS,
     )
@@ -63,6 +71,106 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/healthz", response_model=HealthView, tags=["ops"], summary="Liveness probe")
     def healthz() -> HealthView:
         return HealthView(status="ok", boot_id=service.boot_id)
+
+    # --------------------------------------------------------------- source API
+
+    @app.get(
+        "/sources/current",
+        response_model=SourceVersionView,
+        tags=["sources"],
+        summary="Inspect the currently active source version",
+    )
+    def current_source() -> SourceVersionView:
+        return SourceVersionView(**service.get_current_source())
+
+    @app.get(
+        "/sources",
+        response_model=SourceVersionList,
+        tags=["sources"],
+        summary="List every activated source version, newest last",
+    )
+    def list_sources() -> SourceVersionList:
+        return SourceVersionList(**service.list_sources())
+
+    @app.get(
+        "/sources/{version}",
+        response_model=SourceVersionView,
+        tags=["sources"],
+        summary="Inspect one activated source version",
+        responses={404: {"model": ErrorBody, "description": "Unknown source version"}},
+    )
+    def get_source(version: int) -> SourceVersionView:
+        return SourceVersionView(**service.get_source(version))
+
+    @app.post(
+        "/sources",
+        response_model=SourceVersionView,
+        status_code=201,
+        tags=["sources"],
+        summary="Upload a whole-file corrected LIMS CSV (source replacement)",
+        description=(
+            "Upload the full replacement extract in the original CSV format and state the "
+            "version it is based on. The file is validated as a whole and activated only if "
+            "the stated base version is still current; two concurrent uploads based on the "
+            "same version can activate at most once. A failed or conflicting upload never "
+            "changes the current source. Consent, study codes and existing batch files are "
+            "untouched; subsequent batches use the new version while each running batch keeps "
+            "the version pinned at its admission."
+        ),
+        responses={
+            400: {"model": ErrorBody, "description": "Uploaded CSV failed whole-file validation"},
+            409: {"model": ErrorBody, "description": "Base version is no longer current (conflict)"},
+            413: {"model": ErrorBody, "description": "Uploaded file is too large"},
+        },
+    )
+    async def upload_source(
+        file: UploadFile = File(..., description="Full corrected LIMS CSV in the original format"),
+        base_version: int = Form(
+            ..., description="Version number this correction is based on (see GET /sources/current)"
+        ),
+    ) -> SourceVersionView:
+        raw = await file.read()
+        return SourceVersionView(**service.upload_source(raw, file.filename or "lims.csv", base_version))
+
+    @app.get(
+        "/sources/{version}/download",
+        tags=["sources"],
+        summary="Download an activated source version's original CSV",
+        description=(
+            "Serves the exact, digest-verified bytes of any activated version, including "
+            "superseded ones, so historical batches can be traced back to their source."
+        ),
+        response_class=StreamingResponse,
+        responses={
+            200: {"content": {"text/csv": {}}, "description": "Source extract CSV"},
+            404: {"model": ErrorBody, "description": "Unknown source version"},
+            409: {"model": ErrorBody, "description": "Stored file missing or altered"},
+        },
+    )
+    def download_source(version: int) -> StreamingResponse:
+        filename, size, handle = service.open_source_download(version)
+
+        def stream():
+            try:
+                while True:
+                    chunk = handle.read(65536)
+                    if not chunk:
+                        break
+                    yield chunk
+            finally:
+                handle.close()
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/csv",
+            headers={
+                "Content-Disposition": f'attachment; filename="v{version}-{filename}"',
+                "Content-Length": str(size),
+                "Cache-Control": "no-store",
+            },
+        )
+
+    # --------------------------------------------------------------- consent API
 
     @app.get(
         "/subjects",

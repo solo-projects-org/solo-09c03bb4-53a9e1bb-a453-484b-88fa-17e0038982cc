@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 data/
 .pytest_cache/
+.pylibs/
+.venv/
+venv/
